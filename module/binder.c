@@ -445,6 +445,10 @@ static void binder_set_nice(long nice)
 	binder_user_error("%d RLIMIT_NICE not set\n", current->pid);
 }
 
+/* 获取binder_buffer的data的size，即data数组的首地址<->下一个buffer的首地址
+ * 之间的size。最后一个buffer的大小为data数组首地址到整个proc->buffer结尾
+ * 的size。
+ */
 static size_t binder_buffer_size(struct binder_proc *proc,
 				 struct binder_buffer *buffer)
 {
@@ -455,6 +459,9 @@ static size_t binder_buffer_size(struct binder_proc *proc,
 			struct binder_buffer, entry) - (size_t)buffer->data;
 }
 
+/*
+ * free buffers红黑树是按照buffer的data size来排列的。
+ */
 static void binder_insert_free_buffer(struct binder_proc *proc,
 				      struct binder_buffer *new_buffer)
 {
@@ -488,6 +495,9 @@ static void binder_insert_free_buffer(struct binder_proc *proc,
 	rb_insert_color(&new_buffer->rb_node, &proc->free_buffers);
 }
 
+/*
+ * allocated buffers红黑树是按照buffer的address(kernel address)来排列的。
+ */
 static void binder_insert_allocated_buffer(struct binder_proc *proc,
 					   struct binder_buffer *new_buffer)
 {
@@ -513,6 +523,9 @@ static void binder_insert_allocated_buffer(struct binder_proc *proc,
 	rb_insert_color(&new_buffer->rb_node, &proc->allocated_buffers);
 }
 
+/*
+ * 按照buffer data address指针来查找，该指针是user space的。
+ */
 static struct binder_buffer *binder_buffer_lookup(struct binder_proc *proc,
 						  void __user *user_ptr)
 {
@@ -537,6 +550,10 @@ static struct binder_buffer *binder_buffer_lookup(struct binder_proc *proc,
 	return NULL;
 }
 
+/*
+ * 为内核虚拟内存和应用虚拟内存分配/释放物理内存: allocate == 1 ? 分配 : 释放;
+ * start, end为内核虚拟地址，vma为应用虚拟内存。
+ */
 static int binder_update_page_range(struct binder_proc *proc, int allocate,
 				    void *start, void *end,
 				    struct vm_area_struct *vma)
@@ -586,6 +603,7 @@ static int binder_update_page_range(struct binder_proc *proc, int allocate,
 		page = &proc->pages[(page_addr - proc->buffer) / PAGE_SIZE];
 
 		BUG_ON(*page);
+		// 分配物理内存
 		*page = alloc_page(GFP_KERNEL | __GFP_HIGHMEM | __GFP_ZERO);
 		if (*page == NULL) {
 			pr_err("%d: binder_alloc_buf failed for page at %p\n",

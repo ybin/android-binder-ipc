@@ -613,12 +613,22 @@ static int binder_update_page_range(struct binder_proc *proc, int allocate,
 		tmp_area.addr = page_addr;
 		tmp_area.size = PAGE_SIZE + PAGE_SIZE /* guard page? */;
 		page_array_ptr = page;
+		/*
+		 * 将分配的物理内存映射到内核虚拟内存，
+		 * page_array_ptr指向物理内存对应的struct page结构体，
+		 * tmp_area是一个vm_struct结构体，kernel将根据其中保存的内容
+		 * 找到对应的OS vm_struct list，并将page与其关联
+		 */
 		ret = map_vm_area(&tmp_area, PAGE_KERNEL, &page_array_ptr);
 		if (ret) {
 			pr_err("%d: binder_alloc_buf failed to map page at %p in kernel\n",
 			       proc->pid, page_addr);
 			goto err_map_kernel_failed;
 		}
+		/*
+		 * user_page_addr是应用虚拟内存地址，
+		 * vm_insert_page()将分配的物理内存页与应用虚拟内存关联
+		 */
 		user_page_addr =
 			(uintptr_t)page_addr + proc->user_buffer_offset;
 		ret = vm_insert_page(vma, user_page_addr, page[0]);
@@ -636,15 +646,20 @@ static int binder_update_page_range(struct binder_proc *proc, int allocate,
 	return 0;
 
 free_range:
+	/* 释放物理内存 */
 	for (page_addr = end - PAGE_SIZE; page_addr >= start;
 	     page_addr -= PAGE_SIZE) {
+		// Step 0. 找到需要释放的物理内存页
 		page = &proc->pages[(page_addr - proc->buffer) / PAGE_SIZE];
+		// Step 1. 如果物理内存被关联到应用虚拟内存，则断开关联
 		if (vma)
 			zap_page_range(vma, (uintptr_t)page_addr +
 				proc->user_buffer_offset, PAGE_SIZE, NULL);
 err_vm_insert_page_failed:
+		// Step 2. 断开内核虚拟内存与物理内存的关联
 		unmap_kernel_range((unsigned long)page_addr, PAGE_SIZE);
 err_map_kernel_failed:
+		// Step 3. 释放物理内存
 		__free_page(*page);
 		*page = NULL;
 err_alloc_page_failed:
@@ -658,6 +673,9 @@ err_no_vma:
 	return -ENOMEM;
 }
 
+/*
+ * 从内核虚拟空间(proc->buffer)中分配binder_buffer对象
+ */
 static struct binder_buffer *binder_alloc_buf(struct binder_proc *proc,
 					      size_t data_size,
 					      size_t offsets_size, int is_async)
@@ -676,6 +694,7 @@ static struct binder_buffer *binder_alloc_buf(struct binder_proc *proc,
 		return NULL;
 	}
 
+	// 按照页面对齐之后的buffer size(数据部分的size，不包括binder_buffer结构体本身的size)
 	size = ALIGN(data_size, sizeof(void *)) +
 		ALIGN(offsets_size, sizeof(void *));
 
@@ -693,11 +712,26 @@ static struct binder_buffer *binder_alloc_buf(struct binder_proc *proc,
 		return NULL;
 	}
 
+	/*
+	 * 搜索合适的空闲buffer， 从proc->free_buffers红黑树的root节点开始查找。
+	 * 如果能找到大小相等的最好，找到之后就break，如果没有恰好相等的，就找
+	 * 一个==较大==的，依次遍历，最差也是从比需要的size大的buffer中找到一个
+	 * 最小的。
+	 * 注意: proc->free_buffers最开始只有一个binder_buffer，即将整个内核
+	 * 虚拟内存视为一个binder_buffer(free_buffers红黑树的root节点)，此时
+	 * 其左、右子树均为NULL。
+	 * 遍历有两个可能的结果:
+	 *   找到一个buffer，其size恰好等于需要的size，此时buffer==best_fit==n==满足要求的buffer;
+	 *   找不到这样的buffer，只能找到相对合适的buffer(best_fit)，此时n==NULL。
+	 */
 	while (n) {
 		buffer = rb_entry(n, struct binder_buffer, rb_node);
 		BUG_ON(!buffer->free);
 		buffer_size = binder_buffer_size(proc, buffer);
 
+		/*
+		 * 找到最接近size的buffer
+		 */
 		if (size < buffer_size) {
 			best_fit = n;
 			n = n->rb_left;
@@ -713,6 +747,7 @@ static struct binder_buffer *binder_alloc_buf(struct binder_proc *proc,
 			proc->pid, size);
 		return NULL;
 	}
+	// n==NULL表明没有找到size恰好相等的buffer，只好使用相对较好的best_fit
 	if (n == NULL) {
 		buffer = rb_entry(best_fit, struct binder_buffer, rb_node);
 		buffer_size = binder_buffer_size(proc, buffer);
@@ -724,10 +759,20 @@ static struct binder_buffer *binder_alloc_buf(struct binder_proc *proc,
 
 	has_page_addr =
 		(void *)(((uintptr_t)buffer->data + buffer_size) & PAGE_MASK);
-	if (n == NULL) {
+	/*
+	 * buffer_size比需要的size大一些，大多少呢?
+	 * 如果超出的部分还能容下一个==特殊==的buffer，那为何不利用起来，
+	 * 再做一个新的buffer出来呢，反正闲着也是闲着！
+	 * 这个特殊的buffer就是"data部分仅能容纳一个cmd(4 byte)"的最小buffer。
+	 */
+	if (n == NULL) {	
 		if (size + sizeof(struct binder_buffer) + 4 >= buffer_size)
+			// 找到的这个buffer虽然比需要的size大一些，但是它没有空间再容纳一个
+			// ==最小==buffer了，所以只能浪费了。
 			buffer_size = size; /* no room for other buffers */
 		else
+			// 哇，超出的部分还可以容纳一个额外的==最小==buffer呢，让我们
+			// 废物利用吧!
 			buffer_size = size + sizeof(struct binder_buffer);
 	}
 	end_page_addr =
@@ -738,9 +783,17 @@ static struct binder_buffer *binder_alloc_buf(struct binder_proc *proc,
 	    (void *)PAGE_ALIGN((uintptr_t)buffer->data), end_page_addr, NULL))
 		return NULL;
 
+	// 现在，best_fit这个buffer就归我们所用了，它不再是free的了。
 	rb_erase(best_fit, &proc->free_buffers);
 	buffer->free = 0;
+	// 将其从free rb-tree转移到allocated rb-tree吧
 	binder_insert_allocated_buffer(proc, buffer);
+	// 哇，让我们在额外的空间里再创建一个==最小==buffer吧，废物利用嘛!
+	// 另外，当best_fit是最后一个buffer的时候，这可不仅仅是废物利用，因为
+	// 它的数据部分空间可是很大呢，大到包含了整个缓冲区所有剩余内容，
+	// 我们必须创建一个新的空闲buffer来接管这么大的空间，否则以后就
+	// 没有free buffer可用了(在driver进行第二次分配的时候就会失败的)，
+	// 所以这个新buffer可是性命攸关呢!
 	if (buffer_size != size) {
 		struct binder_buffer *new_buffer = (void *)buffer->data + size;
 		list_add(&new_buffer->entry, &buffer->entry);
@@ -750,6 +803,7 @@ static struct binder_buffer *binder_alloc_buf(struct binder_proc *proc,
 	binder_debug(BINDER_DEBUG_BUFFER_ALLOC,
 		     "%d: binder_alloc_buf size %zd got %p\n",
 		      proc->pid, size, buffer);
+	// 把新的buffer填充数据，就可以返回使用了
 	buffer->data_size = data_size;
 	buffer->offsets_size = offsets_size;
 	buffer->async_transaction = is_async;
@@ -763,16 +817,20 @@ static struct binder_buffer *binder_alloc_buf(struct binder_proc *proc,
 	return buffer;
 }
 
+// buffer所在page的内存地址
 static void *buffer_start_page(struct binder_buffer *buffer)
 {
 	return (void *)((uintptr_t)buffer & PAGE_MASK);
 }
-
+// 
 static void *buffer_end_page(struct binder_buffer *buffer)
 {
 	return (void *)(((uintptr_t)(buffer + 1) - 1) & PAGE_MASK);
 }
 
+/*
+ * 释放当前buffer与prev/next共同使用的物理内存页
+ */
 static void binder_delete_free_buffer(struct binder_proc *proc,
 				      struct binder_buffer *buffer)
 {
@@ -818,6 +876,13 @@ static void binder_delete_free_buffer(struct binder_proc *proc,
 	}
 }
 
+/*
+ * 释放buffer。
+ *
+ * 释放时需要做两件事情：
+ * a). 内存释放:   释放buffer的数据所占用的物理内存
+ * b). buffer合并: 如果prev或nest是空闲buffer就要把这些空闲的buffer进行合并
+ */
 static void binder_free_buf(struct binder_proc *proc,
 			    struct binder_buffer *buffer)
 {
@@ -846,29 +911,51 @@ static void binder_free_buf(struct binder_proc *proc,
 			      proc->pid, size, proc->free_async_space);
 	}
 
+	// 释放自身数据区的物理内存，注意页对齐，不要把"与其他buffer共享的page"也给释放了
 	binder_update_page_range(proc, 0,
 		(void *)PAGE_ALIGN((uintptr_t)buffer->data),
 		(void *)(((uintptr_t)buffer->data + buffer_size) & PAGE_MASK),
 		NULL);
+	// 这个buffer自由了, 把它从allocated rb-tree中移除吧
 	rb_erase(&buffer->rb_node, &proc->allocated_buffers);
 	buffer->free = 1;
+
+	/* !!!!!!
+	 * 注意: 下面合并buffer的时候需要调用binder_delete_free_buffer()是否物理内存，
+	 * 这是为什么呢，释放buffer的时候不是已经释放物理内存了吗?
+	 * 是这样的，释放buffer的物理内存时只会是否"完全"归属于该buffer的物理内存页，
+	 * 对于那些与其他(next或prev)共同使用的物理内存页是不会释放的(见上面的物理内存
+	 * 释放说明)，现在要合并前后buffer，那么他们与当前buffer共同使用的物理内存页
+	 * 也必须释放才行，否则就内存泄露了哦! binder_delete_free_buffer()这个函数就是
+	 * 用来释放两个buffer共同使用的物理内存页的。
+	 * !!!!!!
+	 */
+	// 如果当前释放的buffer不是buffer list的最后一个，
+	// 就要检查其下一个buffer是否需要合并
 	if (!list_is_last(&buffer->entry, &proc->buffers)) {
 		struct binder_buffer *next = list_entry(buffer->entry.next,
 						struct binder_buffer, entry);
+		// 如果next是空闲的，只要把它delete就好了，其所占据的内核虚拟内存
+		// 自然就归入到当前buffer中了
 		if (next->free) {
 			rb_erase(&next->rb_node, &proc->free_buffers);
 			binder_delete_free_buffer(proc, next);
 		}
 	}
+	// 如果当前释放的buffer不是buffer list的第一个，
+	// 就要检查其上一个buffer是否需要合并
 	if (proc->buffers.next != &buffer->entry) {
 		struct binder_buffer *prev = list_entry(buffer->entry.prev,
 						struct binder_buffer, entry);
+		// 如果prev是空闲的，我们需要先把它delete掉，然后将当前buffer的内核虚拟内存
+		// 归入prev buffer，然后将prev纳入free rb-tree中
 		if (prev->free) {
 			binder_delete_free_buffer(proc, buffer);
 			rb_erase(&prev->rb_node, &proc->free_buffers);
 			buffer = prev;
 		}
 	}
+	// 把释放(物理内存)、合并(如果需要)之后的buffer放置到free rb-tree中
 	binder_insert_free_buffer(proc, buffer);
 }
 

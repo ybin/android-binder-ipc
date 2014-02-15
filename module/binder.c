@@ -978,6 +978,13 @@ static struct binder_node *binder_get_node(struct binder_proc *proc,
 	return NULL;
 }
 
+/*
+ * 创建新的binder node，一个node对应到一个service提供者，即一个在Service Manager
+ * 中注册的service。
+ * cookie就是该service对象在其进程中的address，如BnCameraService
+ * 对象在其所在进程中的address.
+ * ptr应该是handle值才对啊
+ */
 static struct binder_node *binder_new_node(struct binder_proc *proc,
 					   void __user *ptr,
 					   void __user *cookie)
@@ -1576,14 +1583,17 @@ static void binder_transaction(struct binder_proc *proc,
 	if (target_node)
 		binder_inc_node(target_node, 1, 0, NULL);
 
+	// 把数据从应用复制到内核，binder号称的"一次数据复制"指的就是这里
 	offp = (size_t *)(t->buffer->data + ALIGN(tr->data_size, sizeof(void *)));
 
+	// 首先复制data
 	if (copy_from_user(t->buffer->data, tr->data.ptr.buffer, tr->data_size)) {
 		binder_user_error("%d:%d got transaction with invalid data ptr\n",
 				proc->pid, thread->pid);
 		return_error = BR_FAILED_REPLY;
 		goto err_copy_data_failed;
 	}
+	// 然后复制offset数组
 	if (copy_from_user(offp, tr->data.ptr.offsets, tr->offsets_size)) {
 		binder_user_error("%d:%d got transaction with invalid offsets ptr\n",
 				proc->pid, thread->pid);
@@ -1596,9 +1606,25 @@ static void binder_transaction(struct binder_proc *proc,
 		return_error = BR_FAILED_REPLY;
 		goto err_bad_offset;
 	}
+	/*
+	 * offset数组是一个int数组，第n项记录了第n个flat_binder_object结构体
+	 * 在binder_transaction结构体的数据区的偏移量
+	 *
+	 * offp表示offset数组的开始位置，off_end表示offset数组的结束位置
+	 * 下面循环遍历offset数组来处理每一个flat_binder_object对象
+	 *
+	 */
 	off_end = (void *)offp + tr->offsets_size;
 	for (; offp < off_end; offp++) {
 		struct flat_binder_object *fp;
+		/*
+		 * 数据有效性检查:
+		 * a). 偏移量一定要在data_size的范围以内
+		 * b). data_size - 偏移量 > sizeof(flat_binder_object)
+		 *     因为buffer_data + 偏移量 这个位置保存的是某一个
+		 *     flat_binder_object对象
+		 * 下面的if判断即为: if(b || a) ...
+		 */
 		if (*offp > t->buffer->data_size - sizeof(*fp) ||
 		    t->buffer->data_size < sizeof(*fp) ||
 		    !IS_ALIGNED(*offp, sizeof(void *))) {
@@ -1607,6 +1633,7 @@ static void binder_transaction(struct binder_proc *proc,
 			return_error = BR_FAILED_REPLY;
 			goto err_bad_offset;
 		}
+		// 现在取到某一个flat_binder_object对象了，下面根据其类型分别处理
 		fp = (struct flat_binder_object *)(t->buffer->data + *offp);
 		switch (fp->type) {
 		case BINDER_TYPE_BINDER:
@@ -1812,6 +1839,7 @@ int binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 	void __user *end = buffer + size;
 
 	while (ptr < end && thread->return_error == BR_OK) {
+		// 取出具体的write-read命令
 		if (get_user(cmd, (uint32_t __user *)ptr))
 			return -EFAULT;
 		ptr += sizeof(uint32_t);
@@ -2665,6 +2693,7 @@ static long binder_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		goto err_unlocked;
 
 	binder_lock(__func__);
+	// 根据pid来查找thread对象，找不到就创建一个新的
 	thread = binder_get_thread(proc);
 	if (thread == NULL) {
 		ret = -ENOMEM;
@@ -2687,6 +2716,12 @@ static long binder_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			     proc->pid, thread->pid, bwr.write_size,
 			     bwr.write_buffer, bwr.read_size, bwr.read_buffer);
 
+		/*
+		 * 数据是读是写，是由read_size和write_size来决定的。
+		 * 读写是站着应用的角度来说的，即
+		 * write表示应用向driver写数据
+		 * read表示应用从driver读数据
+		 */
 		if (bwr.write_size > 0) {
 			ret = binder_thread_write(proc, thread, (void __user *)bwr.write_buffer, bwr.write_size, &bwr.write_consumed);
 			trace_binder_write_done(ret);

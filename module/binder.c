@@ -203,8 +203,28 @@ static struct binder_transaction_log_entry *binder_transaction_log_add(
 	return e;
 }
 
+/*
+ * binder_workµÄËµÃ÷:
+ * 
+ * Ã¿¸ö½ø³Ì¡¢Ïß³Ì¶¼ÓĞÒ»¸ötodoÁĞ±í(proc->todo, binder_thread->todo)£¬
+ * ÓÃÀ´±íÊ¾¸Ã½ø³Ì¡¢Ïß³ÌµÄÈÎÎñ¶ÓÁĞ£¬½ø³Ì¡¢Ïß³ÌÃ¿´Î»½ĞÑÊ±¾Í²é¿´ÆäÈÎÎñ
+ * ¶ÓÁĞÖĞÊÇ·ñÓĞÈÎÎñ(binder_work)£¬Èç¹ûÓĞ¾Í´¦Àí£¬Èç¹ûÃ»ÓĞ¾Í¼ÌĞøË¯Ãß¡£
+ *
+ * ÕâĞ©todoÁĞ±íÖĞµÄworkµÄ¾ßÌåÄÚÈİÊÇÊ²Ã´ÄØå ±Ï¾¹binder_work¶ÔÏóÖĞ
+ * ²»°üÀ¨ÈÎºÎÓĞĞ§µÄÊı¾İ(³ıÁËwork type)£¬ÆäÊµtodoÁĞ±íÖĞµÄbinder_work
+ * ¶ÔÏó¶¼ÊÇ
+ *    binder_transaction¶ÔÏó(binder_transaction->work)¡¢
+ *    binder_node¶ÔÏó(binder_node->work)
+ *    binder_ref_death¶ÔÏó(binder_ref_death->work)
+ * µÄÒ»²¿·Ö£¬ÕæÕı´¦Àíbinder_workµÄÊ±ºò(binder_thread_readº¯Êı)
+ * ¶¼ÊÇÍ¨¹ıcontainer_ofºêÀ´È¡µÃbinder_workËùÔÚµÄ¶ÔÏó£¬È»ºó¾ßÌåµÄ
+ * Êı¾İ(transactionÀïÃæ¾ÍÓĞ¸ö»õ²Ö)¡¢¹¤×÷Õë¶ÔµÄÄ¿±ê(node»òÕßdeath ref)
+ * ¾Í¶¼ÓĞÁË¡£
+ */
 struct binder_work {
+	// binder_workËù´¦µÄwork¶ÓÁĞ
 	struct list_head entry;
+	// workµÄÊµ¼ÊÖ¸Áî
 	enum {
 		BINDER_WORK_TRANSACTION = 1,
 		BINDER_WORK_TRANSACTION_COMPLETE,
@@ -217,17 +237,25 @@ struct binder_work {
 
 struct binder_node {
 	int debug_id;
+	// °Ñ¸Ãwork¹ÒÔØµ½proc»òÕßthreadµÄtodo¶ÓÁĞÖĞÊ±£¬
+	// Í¨¹ıcontainer_ofºê¾Í¿ÉÒÔÈ¡µÃbinder_node¶ÔÏó£¬¼ûbinder_workµÄËµÃ÷
 	struct binder_work work;
 	union {
 		struct rb_node rb_node;
 		struct hlist_node dead_node;
 	};
+	// binder_nodeËùÔÚµÄ½ø³Ì
 	struct binder_proc *proc;
+	// ¼ÇÂ¼ËùÓĞ¹ØÁªµ½×ÔÉíµÄbinder_refs¶ÔÏó
 	struct hlist_head refs;
+	
 	int internal_strong_refs;
 	int local_weak_refs;
 	int local_strong_refs;
+
+	// service¶ÔÏó(ÈçBnCameraService)µÄweak ref¶ÔÏóÄÚ´æµØÖ·
 	void __user *ptr;
+	// service¶ÔÏó(ÈçBnCameraService)µÄÄÚ´æµØÖ·
 	void __user *cookie;
 	unsigned has_strong_ref:1;
 	unsigned pending_strong_ref:1;
@@ -240,6 +268,7 @@ struct binder_node {
 };
 
 struct binder_ref_death {
+	// ¼ûbinder_workµÄËµÃ÷
 	struct binder_work work;
 	void __user *cookie;
 };
@@ -250,29 +279,49 @@ struct binder_ref {
 	/*   desc + proc => ref (transaction, inc/dec ref) */
 	/*   node => refs + procs (proc exit) */
 	int debug_id;
+	// binder_refÒª¹ÒÔØµ½½ø³ÌµÄ°´ÕÕdesc½øĞĞË÷ÒırefsºìºÚÊ÷(proc->refs_by_desc)
 	struct rb_node rb_node_desc;
+	// binder_ref»¹Òª±»¹ÒÔØµ½½ø³ÌµÄ°´ÕÕnodeµØÖ·½øĞĞË÷ÒıµÄrefsºìºÚÊ÷(proc->refs_by_node)
 	struct rb_node rb_node_node;
+	// binder_ref»¹Òª¹ÒÔØµ½node¶ÔÏóµÄrefs¶ÓÁĞ(binder_node->refs)ÖĞ£¬
+	// ÒòÎªnodeÒªÖªµÀ¶¼ÓĞÄÄĞ©ref¹ØÁªµ½ËüÁË
 	struct hlist_node node_entry;
+	// binder_ref»¹ÒªÖªµÀ×ÔÉíÎ»ÓÚÄÄ¸ö½ø³Ì
 	struct binder_proc *proc;
+	// ÒÔ¼°¹ØÁªµ½ÄÄ¸önodeÁË
 	struct binder_node *node;
+	// Ò»¸öbinder_refÔÚÒ»¸ö½ø³ÌÖĞµÄÎ¨Ò»´úºÅ(Ò²¾ÍÊÇÓ¦ÓÃÖĞµÄhandle)
 	uint32_t desc;
+	// Ç¿¡¢ÈõÒıÓÃ¼ÆÊı
 	int strong;
 	int weak;
+	// ËÀÍöÍ¨Öª
 	struct binder_ref_death *death;
 };
 
 struct binder_buffer {
+	// ÈÎºÎÒ»¸öbuffer¶¼Òª¹ÒÔØµ½½ø³ÌµÄbuffer¶ÓÁĞ(proc->buffers)ÖĞ
 	struct list_head entry; /* free and allocated entries by address */
-	struct rb_node rb_node; /* free entry by size or allocated entry */
-				/* by address */
+	// ÁíÍâ»¹Òª¸ù¾İ¸ÃbufferÊÇ·ñ¿ÕÏĞ¶ø¹ÒÔØµ½½ø³ÌµÄ
+	// ¿ÕÏĞbufferºìºÚÊ÷(proc->free_buffers)
+	// »òÕß
+	// Ê¹ÓÃÖĞbufferºìºÚÊ÷(proc->allocated_buffer)
+	struct rb_node rb_node; /* free entry by size or allocated entry by address */
+	
 	unsigned free:1;
 	unsigned allow_user_free:1;
 	unsigned async_transaction:1;
 	unsigned debug_id:29;
 
+	// bufferÊÇtransactionÕâÖ»´¬µÄ»õ²ÖÎïÆ·Ö®Ò»£¬
+	// ËùÒÔbufferÒªÖªµÀËü¹éÊôÓÚÄÄÖ»´¬£¬¼ûbinder_transaction½á¹¹
 	struct binder_transaction *transaction;
 
+	// Í¨¹ıbinder_transaction½á¹¹ÎÒÃÇÒÑ¾­ÖªµÀÊı¾İ±»ËÍÍùÄÄ¸ö¸Û¿Ú
+	// (transaction_stack, from_parent, to_parent)£¬È»ºóÎÒÃÇ»¹Òª
+	// ÖªµÀÊı¾İ½»ÓÉÄÄ¸önodeÈ¥´¦Àí£¬±Ï¾¹serviceµÄ´ú±íÊÇnode
 	struct binder_node *target_node;
+	// ÏÂÃæÊÇ¾ßÌåµÄÊı¾İĞÅÏ¢
 	size_t data_size;
 	size_t offsets_size;
 	uint8_t data[0];
@@ -339,7 +388,7 @@ struct binder_proc {
 	// »º³åÇø´óĞ¡
 	size_t buffer_size;
 	uint32_t buffer_free;
-	// ÈÎÎñ¶ÓÁĞ
+	// ÈÎÎñ¶ÓÁĞ£¬ÕâÉÏÃæ¹ÒÔØµÄÊÇbinder_work¶ÔÏó
 	struct list_head todo;
 	wait_queue_head_t wait;
 	
@@ -374,6 +423,7 @@ struct binder_thread {
 	int pid;
 	int looper;
 	struct binder_transaction *transaction_stack;
+	// ÈÎÎñ¶ÓÁĞ£¬ÕâÉÏÃæ¹ÒÔØµÄÊÇbinder_work¶ÔÏó
 	struct list_head todo;
 	uint32_t return_error; /* Write failed, return error code in read buf */
 	uint32_t return_error2; /* Write failed, return error code in read */
@@ -396,9 +446,12 @@ struct binder_thread {
  */
 struct binder_transaction {
 	int debug_id;
+	// ½«¸Ãwork¹ÒÔØµ½proc»òthreadµÄtodo¶ÓÁĞÖĞ£¬
+	// ¾Í¿ÉÒÔÊ¹ÓÃcontainer_ofºêÈ¡µÃbinder_transaction¶ÔÏó£¬
+	// ¼ûbinder_workµÄËµÃ÷
+	struct binder_work work;
 	// ´ÓÄÄÀïÀ´µ½ºÎ´¦È¥:
 	// Æ¶É®´Ó¶«ÍÁ´óÌÆ¶øÀ´£¬Ç°ÍùÎ÷ÌìÈ¡¾­¡£¡£¡£
-	struct binder_work work;
 	struct binder_thread *from;
 	struct binder_transaction *from_parent;
 	struct binder_proc *to_proc;

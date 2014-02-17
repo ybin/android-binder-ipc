@@ -285,36 +285,72 @@ enum binder_deferred_state {
 };
 
 struct binder_proc {
+	// ÔÚÈ«¾Ö±äÁ¿proc_nodesÁĞ±íÖĞµÄ±êÊ¶£¬ÓÃÓÚÍ³¼Æ
 	struct hlist_node proc_node;
+	// ¸Ã½ø³ÌÖĞµÄËùÓĞthreads×é³ÉµÄrb-tree£¬°´ÕÕpid½øĞĞË÷Òı
 	struct rb_root threads;
+	// ¸Ã½ø³ÌÖĞµÄËùÓĞnode×é³ÉµÄrb-tree£¬Ò»¸önode´ú±íÒ»ÖÖservice£¬
+	// Èçmedia.player, media.cameraµÈ£¬°´ÕÕnode->ptr£¬¼´node
+	// µÄweak ref½øĞĞË÷Òı
 	struct rb_root nodes;
+	// ¸Ã½ø³ÌÖĞµÄËùÓĞref×é³ÉµÄrb-tree£¬°´ÕÕref-desc½øĞĞË÷Òı£¬
+	// ref-descÊÇÒ»¸ö½ø³ÌÖĞËùÓĞref°´ÕÕ´´½¨µÄÏÈºóË³Ğò·ÖÅäµÄÒ»¸ö
+	// ÕûÊı£¬desc, handleÊÇÍ¬Ò»¸ö¶«Î÷
 	struct rb_root refs_by_desc;
+	// ¸Ã½ø³ÌÖĞµÄËùÓĞref×é³ÉµÄrb-tree£¬°´ÕÕnodeÄÚ´æµØÖ·½øĞĞË÷Òı
 	struct rb_root refs_by_node;
+	// ½ø³Ìpid£¬ËüµÈÓÚ½ø³ÌµÄtgid(thread group id)
 	int pid;
+	/*
+	 * Ã¿¸ö½ø³Ì¶¼ÓĞÒ»¿é¶ùÎïÀíÄÚ´æ×÷Îªbuffer£¬Õâ¿é¶ùÎïÀíÄÚ´æ·Ö±ğ
+	 * mapµ½ÄÚºËĞéÄâÄÚ´æ¿Õ¼äºÍÓ¦ÓÃĞéÄâÄÚ´æ¿Õ¼ä(service¶Ë)£¬ÕâÑù
+	 * ¾Í¿ÉÒÔ¼õÉÙÒ»´ÎÄÚ´æ¸´ÖÆº
+	 *   client -->ÄÚ´æ¸´ÖÆ--> driver -->ÓÉÓÚÊÇÎïÀíÄÚ´æ¹²Ïí£¬ËùÒÔÊµ¼Ê²»ÓÃÄÚ´æ¸´ÖÆ--> service
+	 * 
+	 * ÏÂÃæµÄvma¼´ÎªÓ¦ÓÃĞéÄâÄÚ´æ¿Õ¼äµÄÒ»¿é¶ùĞéÄâÄÚ´æ
+	 */
 	struct vm_area_struct *vma;
 	struct mm_struct *vma_vm_mm;
+	// tsk, filesÎª³£¹æµÄ½ø³Ì×ÊÔ´
 	struct task_struct *tsk;
 	struct files_struct *files;
+	// ÑÓ³Ù¹¤×÷ ÁĞ±í£¬Ò»Ğ©ÑÓ³ÙÖ´ĞĞµÄ¹¤×÷·ÅÖÃµ½¸ÃÁĞ±íÖĞ¼´¿É
 	struct hlist_node deferred_work_node;
 	int deferred_work;
+	// ÄÚºËĞéÄâÄÚ´æ¿Õ¼äÖĞµÄÒ»¿é¶ùÄÚ´æ£¬¼ûvmaÊôĞÔµÄËµÃ÷
 	void *buffer;
+	// ÓÉÓÚÓÃ×÷bufferµÄÄÚºËĞéÄâÄÚ´æ¸úÓ¦ÓÃĞéÄâÄÚ´æ¶¼ÊÇÁ¬ĞøµÄ£¬
+	// ËùÒÔÁ½Õß½øĞĞ×ª»»µÄÊ±ºòÖ»ĞèÒ»¸öµØÖ·Æ«ÒÆÁ¿¼´¿É
 	ptrdiff_t user_buffer_offset;
 
+	// ¸Ã½ø³ÌÖĞËùÓĞbuffer×é³ÉµÄÁĞ±í£¬¸ÃÁĞ±íÖĞµÄÔªËØÅÅÁĞË³Ğò
+	// ¸úbuffer¿Õ¼äÖĞµÄbufferÅÅÁĞË³ĞòÊÇÒ»ÖÂµÄ
 	struct list_head buffers;
+	// ¸Ã½ø³ÌÖĞËùÓĞ¿ÕÏĞbuffer×é³ÉµÄrb-tree£¬°´ÕÕbuffer address½øĞĞË÷Òı
 	struct rb_root free_buffers;
+	// ¸Ã½ø³ÌÖĞËùÓĞÊ¹ÓÃÖĞµÄbuffer×é³ÉµÄrb-tree£¬°´ÕÕbuffer address½øĞĞË÷Òı
 	struct rb_root allocated_buffers;
+	// Òì²½´«ÊäÊ¹ÓÃµÄbuffer¿Õ¼ä´óĞ¡async transaction¼´ÎªONE_WAYµÄ£¬Ò»°ãÎª
+	// death notification
 	size_t free_async_space;
 
+	// ÎïÀíÒ³Ãæ£¬Ò»¸öpage¶ÔÓ¦Ò»¸öÎïÀíÒ³Ãæ
 	struct page **pages;
+	// »º³åÇø´óĞ¡
 	size_t buffer_size;
 	uint32_t buffer_free;
+	// ÈÎÎñ¶ÓÁĞ
 	struct list_head todo;
 	wait_queue_head_t wait;
+	
 	struct binder_stats stats;
 	struct list_head delivered_death;
+	// ×î´óÏß³ÌÊı£¬Ò»°ãÎª15
 	int max_threads;
+	// ÇëÇóµÄthreadÊıÁ¿
 	int requested_threads;
 	int requested_threads_started;
+	// ¿ÕÏĞµÄthreadÊıÁ¿
 	int ready_threads;
 	long default_priority;
 	struct dentry *debugfs_entry;
@@ -330,8 +366,11 @@ enum {
 };
 
 struct binder_thread {
+	// ¸ÃÏß³ÌËùÔÚµÄ½ø³Ì
 	struct binder_proc *proc;
+	// ¸ÃÏß³ÌÔÚÆä½ø³Ìrb-treeÖĞµÄ´ú±í£¬Ëü±»¹ÒÔØµ½proc->threads rb-treeÖĞ
 	struct rb_node rb_node;
+	// ÕæÕıµÄpid£¬Âß¼­ÉÏµÄtid
 	int pid;
 	int looper;
 	struct binder_transaction *transaction_stack;
@@ -341,11 +380,24 @@ struct binder_thread {
 		/* buffer. Used when sending a reply to a dead process that */
 		/* we are also waiting on */
 	wait_queue_head_t wait;
+	// Í³¼ÆĞÅÏ¢
 	struct binder_stats stats;
 };
 
+/*
+ * Êı¾İ´ÓÒ»¸ö½ø³Ì´«µİµ½ÁíÒ»¸ö½ø³Ì£¬ÔÚdriverµÄ½Ç¶È¿´¾ÍÊÇ
+ * ´ÓÒ»¸ö½ø³ÌµÄproc¶ÔÏó´«µİµ½ÁíÒ»¸ö½ø³ÌµÄproc¶ÔÏó£¬È»¶ø
+ * Ò»¸ö½ø³Ì¿ÉÄÜÓĞ¶à¸öÏß³Ì´æÔÚ£¬ËùÒÔ»¹ÒªÇø·ÖÊÇ´ÓÄÄ¸öÏß³Ì
+ * ´«µİµ½ÄÄ¸öÏß³Ì£¬´«µİµÄÊı¾İÓÃÒ»¸öbinder_transaction
+ * ¶ÔÏóÀ´±íÊ¾£¬Ò»¸öbinder_transaction×îÖÕÒª¹ÒÔØµ½Ä³Ò»¸ö
+ * thread£¬¾ÍÏñÃ¿Ò»ËÒ´¬×îÖÕ¶¼ÒªÍ£²´ÔÚÄ³Ò»¸ö¸Û¿ÚÒ»Ñù£¬
+ * binder_transaction¾ÍÊÇÒ»Ö»´¬£¬¶øthread->transaction_stack
+ * ¾ÍÊÇÒ»¸ö¸Û¿Ú¡£
+ */
 struct binder_transaction {
 	int debug_id;
+	// ´ÓÄÄÀïÀ´µ½ºÎ´¦È¥:
+	// Æ¶É®´Ó¶«ÍÁ´óÌÆ¶øÀ´£¬Ç°ÍùÎ÷ÌìÈ¡¾­¡£¡£¡£
 	struct binder_work work;
 	struct binder_thread *from;
 	struct binder_transaction *from_parent;
@@ -355,6 +407,7 @@ struct binder_transaction {
 	unsigned need_reply:1;
 	/* unsigned is_dead:1; */	/* not used at the moment */
 
+	// ´¬ÉÏÔØµÄ¾ßÌåÊı¾İÊÇÊ²Ã´ÄØ£¬ÏÂÃæ¾ÍÊÇ»õ²Ö
 	struct binder_buffer *buffer;
 	unsigned int	code;
 	unsigned int	flags;

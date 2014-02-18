@@ -4,31 +4,13 @@
 #ifndef _BINDER_H_
 #define _BINDER_H_
 
-#ifndef uint8_t
-typedef unsigned char	uint8_t;
-#endif
-
-#ifndef uint16_t
-typedef unsigned short	uint16_t;
-#endif
-
-#ifndef uint32_t
-typedef unsigned int	uint32_t;
-#endif
-
-#ifndef uint64_t
-typedef struct _uint64_t {
-	uint32_t low_dw;
-	uint32_t hi_dw;
-} uint64_t;
-#endif
-
 #include <sys/ioctl.h>
-
-#include "module/binder.h"
+#include <linux/binder.h>
 
 struct binder_state;
 
+// binder_object结构跟flat_binder_object是一样的，
+// 可以直接拿来使用
 struct binder_object
 {
     uint32_t type;
@@ -37,6 +19,9 @@ struct binder_object
     void *cookie;
 };
 
+// binder_txn结构跟binder_transaction_data是一样的，
+// 所以可以直接拿binder_transaction_data当做binder_txn
+// 来使用，不用做任何转换，见binder_parse()函数
 struct binder_txn
 {
     void *target;
@@ -53,6 +38,9 @@ struct binder_txn
     void *offs;
 };
 
+// binder_io是service manager中实际使用的数据结构，
+// binder_txn要转换为(部分内存可共享)binder_io之后
+// 再进行进一步处理
 struct binder_io
 {
     char *data;            /* pointer to read/write from */

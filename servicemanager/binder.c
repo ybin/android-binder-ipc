@@ -6,10 +6,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <string.h>
 #include <sys/mman.h>
-
-#define BUF_ALIGN(x)		(((x) + sizeof(void *) - 1) & ~(sizeof(void *) - 1))
 
 #include "binder.h"
 
@@ -17,7 +14,8 @@
 
 #define TRACE 0
 
-#define LOGE(x...) fprintf(stderr, "svcmgr: " x)
+#define LOG_TAG "Binder"
+#include <cutils/log.h>
 
 void bio_init_from_txn(struct binder_io *io, struct binder_txn *txn);
 
@@ -93,6 +91,10 @@ struct binder_state
     unsigned mapsize;
 };
 
+/*
+ * open binder device
+ * 将fd, mapsize, map address保存到binder_state结构中
+ */
 struct binder_state *binder_open(unsigned mapsize)
 {
     struct binder_state *bs;
@@ -141,11 +143,13 @@ int binder_become_context_manager(struct binder_state *bs)
     return ioctl(bs->fd, BINDER_SET_CONTEXT_MGR, 0);
 }
 
+/*
+ * 根据传递进来的数据，创建binder_write_read结构并通过ioctl将数据写入驱动
+ */
 int binder_write(struct binder_state *bs, void *data, unsigned len)
 {
     struct binder_write_read bwr;
     int res;
-
     bwr.write_size = len;
     bwr.write_consumed = 0;
     bwr.write_buffer = (unsigned) data;
@@ -160,6 +164,8 @@ int binder_write(struct binder_state *bs, void *data, unsigned len)
     return res;
 }
 
+// free buffer & reply to driver
+// 一次发送两条指令: 释放缓存 & 回复
 void binder_send_reply(struct binder_state *bs,
                        struct binder_io *reply,
                        void *buffer_to_free,
@@ -194,6 +200,9 @@ void binder_send_reply(struct binder_state *bs,
     binder_write(bs, &data, sizeof(data));
 }
 
+/*
+ * 解析从驱动读取上来的数据，如果bio != NULL，则同时将数据保存到bio中
+ */
 int binder_parse(struct binder_state *bs, struct binder_io *bio,
                  uint32_t *ptr, uint32_t size, binder_handler func)
 {
@@ -220,9 +229,10 @@ int binder_parse(struct binder_state *bs, struct binder_io *bio,
             ptr += 2;
             break;
         case BR_TRANSACTION: {
+			// binder_txn结构跟binder_transaction_data结构是一样的，直接拿来用即可
             struct binder_txn *txn = (void *) ptr;
             if ((end - ptr) * sizeof(uint32_t) < sizeof(struct binder_txn)) {
-                LOGE("parse: txn too small!\n");
+                ALOGE("parse: txn too small!\n");
                 return -1;
             }
             binder_dump_txn(txn);
@@ -232,34 +242,34 @@ int binder_parse(struct binder_state *bs, struct binder_io *bio,
                 struct binder_io reply;
                 int res;
 
+				// 初始化reply对象内存为binder_io结构
                 bio_init(&reply, rdata, sizeof(rdata), 4);
+				// 将binder_transaction_data结构转换为binder_io结构
                 bio_init_from_txn(&msg, txn);
+				// 调用回调函数处理msg对象，并将结果保存到reply对象中
                 res = func(bs, txn, &msg, &reply);
+				// 释放txn->data缓存; 给驱动发送reply数据，这些数据
+				// 根据res的不同会有所不同(res==0表示回调函数执行成功)
                 binder_send_reply(bs, &reply, txn->data, res);
             }
             ptr += sizeof(*txn) / sizeof(uint32_t);
-#ifdef INLINE_TRANSACTION_DATA
-            ptr += (BUF_ALIGN(txn->data_size)+ BUF_ALIGN(txn->offs_size)) / sizeof(uint32_t);
-#endif
             break;
         }
         case BR_REPLY: {
             struct binder_txn *txn = (void*) ptr;
             if ((end - ptr) * sizeof(uint32_t) < sizeof(struct binder_txn)) {
-                LOGE("parse: reply too small!\n");
+                ALOGE("parse: reply too small!\n");
                 return -1;
             }
             binder_dump_txn(txn);
             if (bio) {
+				// 如果调用者希望拿到数据，就把数据写入bio对象
                 bio_init_from_txn(bio, txn);
                 bio = 0;
             } else {
                     /* todo FREE BUFFER */
             }
             ptr += (sizeof(*txn) / sizeof(uint32_t));
-#ifdef INLINE_TRANSACTION_DATA
-            ptr += (BUF_ALIGN(txn->data_size)+ BUF_ALIGN(txn->offs_size)) / sizeof(uint32_t);
-#endif
             r = 0;
             break;
         }
@@ -275,7 +285,7 @@ int binder_parse(struct binder_state *bs, struct binder_io *bio,
             r = -1;
             break;
         default:
-            LOGE("parse: OOPS %d\n", cmd);
+            ALOGE("parse: OOPS %d\n", cmd);
             return -1;
         }
     }
@@ -319,11 +329,7 @@ int binder_call(struct binder_state *bs,
         uint32_t cmd;
         struct binder_txn txn;
     } writebuf;
-#ifdef INLINE_TRANSACTION_DATA
-    unsigned readbuf[1024];
-#else
     unsigned readbuf[32];
-#endif
 
     if (msg->flags & BIO_F_OVERFLOW) {
         fprintf(stderr,"binder: txn buffer overflow\n");
@@ -371,11 +377,7 @@ void binder_loop(struct binder_state *bs, binder_handler func)
 {
     int res;
     struct binder_write_read bwr;
-#ifdef INLINE_TRANSACTION_DATA
-    unsigned readbuf[1024];
-#else
     unsigned readbuf[32];
-#endif
 
     bwr.write_size = 0;
     bwr.write_consumed = 0;
@@ -392,22 +394,23 @@ void binder_loop(struct binder_state *bs, binder_handler func)
         res = ioctl(bs->fd, BINDER_WRITE_READ, &bwr);
 
         if (res < 0) {
-            LOGE("binder_loop: ioctl failed (%s)\n", strerror(errno));
+            ALOGE("binder_loop: ioctl failed (%s)\n", strerror(errno));
             break;
         }
 
         res = binder_parse(bs, 0, readbuf, bwr.read_consumed, func);
         if (res == 0) {
-            LOGE("binder_loop: unexpected reply?!\n");
+            ALOGE("binder_loop: unexpected reply?!\n");
             break;
         }
         if (res < 0) {
-            LOGE("binder_loop: io error %d %s\n", res, strerror(errno));
+            ALOGE("binder_loop: io error %d %s\n", res, strerror(errno));
             break;
         }
     }
 }
 
+// 将binder_txn结构转换为binder_io结构，共享部分内存
 void bio_init_from_txn(struct binder_io *bio, struct binder_txn *txn)
 {
     bio->data = bio->data0 = txn->data;
@@ -417,6 +420,7 @@ void bio_init_from_txn(struct binder_io *bio, struct binder_txn *txn)
     bio->flags = BIO_F_SHARED;
 }
 
+// 将一块儿内存区域格式化为binder_io结构
 void bio_init(struct binder_io *bio, void *data,
               uint32_t maxdata, uint32_t maxoffs)
 {
@@ -429,7 +433,7 @@ void bio_init(struct binder_io *bio, void *data,
         return;
     }
 
-    bio->data = bio->data0 = data + n;
+    bio->data = bio->data0 = (char *) data + n;
     bio->offs = bio->offs0 = data;
     bio->data_avail = maxdata - n;
     bio->offs_avail = maxoffs;

@@ -55,7 +55,9 @@ struct binder_io
 };
 
 struct binder_death {
+	// 死亡处理函数
     void (*func)(struct binder_state *bs, void *ptr);
+	// 该binder_death所处的svcinfo对象
     void *ptr;
 };    
 

@@ -318,7 +318,11 @@ void binder_link_to_death(struct binder_state *bs, void *ptr, struct binder_deat
     binder_write(bs, cmd, sizeof(cmd));
 }
 
-
+/*
+ * 将msg信息写入驱动，并等待驱动返回(返回值写入reply对象)，
+ * 然后处理reply对象，binder_loop()函数只是读取驱动返回值，
+ * 而binder_call()先写入再读取
+ */
 int binder_call(struct binder_state *bs,
                 struct binder_io *msg, struct binder_io *reply,
                 void *target, uint32_t code)
@@ -373,6 +377,7 @@ fail:
     return -1;
 }
 
+// 读取驱动返回值并处理，只读取不写入，见binder_call()函数的说明
 void binder_loop(struct binder_state *bs, binder_handler func)
 {
     int res;
@@ -440,6 +445,8 @@ void bio_init(struct binder_io *bio, void *data,
     bio->flags = 0;
 }
 
+// 从bio->data中分配size大小的空间，如果分配失败返回NULL，
+// 否则返回bio->data指针
 static void *bio_alloc(struct binder_io *bio, uint32_t size)
 {
     size = (size + 3) & (~3);
@@ -467,6 +474,7 @@ void binder_done(struct binder_state *bs,
     }
 }
 
+// 从bio->data分配一个binder_object
 static struct binder_object *bio_alloc_obj(struct binder_io *bio)
 {
     struct binder_object *obj;
@@ -490,6 +498,7 @@ void bio_put_uint32(struct binder_io *bio, uint32_t n)
         *ptr = n;
 }
 
+// 往bio->data中put一个binder_object对象，该对象中保存ptr的值
 void bio_put_obj(struct binder_io *bio, void *ptr)
 {
     struct binder_object *obj;

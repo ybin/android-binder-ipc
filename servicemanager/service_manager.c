@@ -87,9 +87,14 @@ int svc_can_register(unsigned uid, uint16_t *name)
     return 0;
 }
 
+// service item
 struct svcinfo 
 {
     struct svcinfo *next;
+	// service对象的弱引用(weak ref)，通过ptr找到本进程中的binder_ref对象
+	// (位于内核空间，service在注册时创建的)，进一步找到service的binder_node
+	// 对象(位于内核空间，service在注册时创建的)，进而将数据传递到service
+	// 进程的service对象中
     void *ptr;
     struct binder_death death;
     int allow_isolated;
@@ -99,6 +104,7 @@ struct svcinfo
 
 struct svcinfo *svclist = 0;
 
+// 根据name找到svninfo对象
 struct svcinfo *find_svc(uint16_t *s16, unsigned len)
 {
     struct svcinfo *si;
@@ -112,6 +118,7 @@ struct svcinfo *find_svc(uint16_t *s16, unsigned len)
     return 0;
 }
 
+// 默认的死亡通知函数，即释放service对应的binder_ref
 void svcinfo_death(struct binder_state *bs, void *ptr)
 {
     struct svcinfo *si = ptr;
@@ -127,7 +134,7 @@ uint16_t svcmgr_id[] = {
     'I','S','e','r','v','i','c','e','M','a','n','a','g','e','r' 
 };
   
-
+// 根据name查找service对应的弱引用(weak ref)
 void *do_find_service(struct binder_state *bs, uint16_t *s, unsigned len, unsigned uid)
 {
     struct svcinfo *si;
@@ -149,6 +156,7 @@ void *do_find_service(struct binder_state *bs, uint16_t *s, unsigned len, unsign
     }
 }
 
+// 根据service的name和weak ref创建svcinfo对象并添加到service list中
 int do_add_service(struct binder_state *bs,
                    uint16_t *s, unsigned len,
                    void *ptr, unsigned uid, int allow_isolated)
@@ -192,11 +200,19 @@ int do_add_service(struct binder_state *bs,
         svclist = si;
     }
 
+	// 增加弱引用计数
     binder_acquire(bs, ptr);
+	// 注册死亡通知
     binder_link_to_death(bs, ptr, &si->death);
     return 0;
 }
 
+/*
+ * 处理驱动传递上来的数据
+ *   xn为原始数据，
+ *   msg为格式化为binder_io之后的数据，
+ *   reply用来保存处理结果
+ */
 int svcmgr_handler(struct binder_state *bs,
                    struct binder_txn *txn,
                    struct binder_io *msg,
@@ -230,6 +246,7 @@ int svcmgr_handler(struct binder_state *bs,
     switch(txn->code) {
     case SVC_MGR_GET_SERVICE:
     case SVC_MGR_CHECK_SERVICE:
+		// get service: 返回service对应的weak ref
         s = bio_get_string16(msg, &len);
         ptr = do_find_service(bs, s, len, txn->sender_euid);
         if (!ptr)
@@ -238,6 +255,7 @@ int svcmgr_handler(struct binder_state *bs,
         return 0;
 
     case SVC_MGR_ADD_SERVICE:
+		// add service: 为service创建对应的svcinfo对象
         s = bio_get_string16(msg, &len);
         ptr = bio_get_ref(msg);
         allow_isolated = bio_get_uint32(msg) ? 1 : 0;
@@ -246,6 +264,7 @@ int svcmgr_handler(struct binder_state *bs,
         break;
 
     case SVC_MGR_LIST_SERVICES: {
+		// list service: 返回当前注册过的service's name列表
         unsigned n = bio_get_uint32(msg);
 
         si = svclist;

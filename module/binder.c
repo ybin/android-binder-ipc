@@ -229,9 +229,9 @@ struct binder_work {
 		BINDER_WORK_TRANSACTION = 1,
 		BINDER_WORK_TRANSACTION_COMPLETE,
 		BINDER_WORK_NODE,
-		BINDER_WORK_DEAD_BINDER,
-		BINDER_WORK_DEAD_BINDER_AND_CLEAR,
-		BINDER_WORK_CLEAR_DEATH_NOTIFICATION,
+		BINDER_WORK_DEAD_BINDER, // node死亡时向client发送此类型work进行通知，最后这三个都是发往client的
+		BINDER_WORK_DEAD_BINDER_AND_CLEAR, //client注销死亡通知时，发现还有死亡通知等待处理，此时发送此类型work
+		BINDER_WORK_CLEAR_DEATH_NOTIFICATION, // clinet注销死亡通知时，没有待处理的死亡通知，可以正常注销
 	} type;
 };
 
@@ -421,6 +421,16 @@ struct binder_thread {
 	struct rb_node rb_node;
 	// 真正的pid，逻辑上的tid
 	int pid;
+	// looper的一个很重要的作用是判断当前thread是否为pool thread，
+	// 任何一个线程都可以通过IPCThreadState向驱动发送消息，但是
+	// 只有pool thread才会监听驱动的消息，即pool thread才会处理其
+	// todo队列，如果当前线程不是pool thread，内核就将work挂载到
+	// proc的todo队列。
+	//
+	// if(thread->looper & (BINDER_LOOPER_STATE_REGISTERED | BINDER_LOOPER_STATE_ENTERED))
+	//     current is pool thread, mount work to thread->todo
+	// else
+	//     current is normal thread, mount work to proc->todo
 	int looper;
 	struct binder_transaction *transaction_stack;
 	// 任务队列，这上面挂载的是binder_work对象
@@ -2161,7 +2171,9 @@ int binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 
 		case BC_REQUEST_DEATH_NOTIFICATION:
 		case BC_CLEAR_DEATH_NOTIFICATION: {
+			// target指的是handle
 			uint32_t target;
+			// cookie指的是BpBinder的内存地址
 			void __user *cookie;
 			struct binder_ref *ref;
 			struct binder_ref_death *death;
@@ -2192,6 +2204,17 @@ int binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 				     cookie, ref->debug_id, ref->desc,
 				     ref->strong, ref->weak, ref->node->debug_id);
 
+			/*
+			 * 注册死亡通知:
+			 *  a). 找到binder_ref: handle => binder_ref
+			 *  b). 分配binder_ref_death对象
+			 *  c). 初始化binder_ref_death对象并关联到binder_ref对象
+			 *
+			 * 由于binder_ref对象已经关联到binder_node了(创建binder_ref时)，
+			 * binder_node所在进程正常/意外死亡时必定会调用到release system call，
+			 * 在那里node会检查其所关联的binder_ref(binder_node->refs)是否
+			 * 有death对象，如果有就发送死亡通知。
+			 */
 			if (cmd == BC_REQUEST_DEATH_NOTIFICATION) {
 				if (ref->death) {
 					binder_user_error("%d:%d BC_REQUEST_DEATH_NOTIFICATION death notification already set\n",
@@ -2210,6 +2233,11 @@ int binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 				INIT_LIST_HEAD(&death->work.entry);
 				death->cookie = cookie;
 				ref->death = death;
+				/* 如果关注的node已经死亡，就直接把这个work挂载到client进程的todo列表中，
+				 * 下一次client处理todo队列时就会知道node已经死亡了，这次检查是必须进行
+				 * 的，否则如果node已经死亡的话，死亡通知就永远发不出来了，因为已经死亡
+				 * 的node是不会调用到release system call的，见上面的说明。
+				 */
 				if (ref->node->proc == NULL) {
 					ref->death->work.type = BINDER_WORK_DEAD_BINDER;
 					if (thread->looper & (BINDER_LOOPER_STATE_REGISTERED | BINDER_LOOPER_STATE_ENTERED)) {
@@ -2220,6 +2248,16 @@ int binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 					}
 				}
 			} else {
+				/*
+				 * 注销死亡通知:
+				 *  a). 去掉binder_ref里的death对象: ref->death = NULL
+				 *  b). 处理已经存在的死亡通知:
+				 *      1. 如果当前有死亡通知等待处理，就修改其type为BINDER_WORK_DEAD_BINDER_AND_CLEAR
+				 *         即处理死亡通知并注销死亡通知(既然当前已有死亡通知，death->work肯定被挂载到
+				 *         client thread的todo队列中了)
+				 *      2. 没有死亡通知的话就通知client thread(pool thread)死亡通知已经注销了
+				 *         (往client thread的todo队列中发送BINDER_WORK_CLEAR_DEATH_NOTIFICATION消息)
+				 */
 				if (ref->death == NULL) {
 					binder_user_error("%d:%d BC_CLEAR_DEATH_NOTIFICATION death notification not active\n",
 						proc->pid, thread->pid);
@@ -2248,6 +2286,7 @@ int binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 			}
 		} break;
 		case BC_DEAD_BINDER_DONE: {
+			// 接收到的死亡通知已经处理完毕
 			struct binder_work *w;
 			void __user *cookie;
 			struct binder_ref_death *death = NULL;

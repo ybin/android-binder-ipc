@@ -226,9 +226,9 @@ struct binder_work {
 	struct list_head entry;
 	// work的实际指令
 	enum {
-		BINDER_WORK_TRANSACTION = 1,
-		BINDER_WORK_TRANSACTION_COMPLETE,
-		BINDER_WORK_NODE,
+		BINDER_WORK_TRANSACTION = 1, // 发起一次transaction时，该work被发送给接收者线程/进程的todo队列
+		BINDER_WORK_TRANSACTION_COMPLETE, // driver接收transaction之后立刻给transaction发起者发送该work
+		BINDER_WORK_NODE, // service线程/进程的todo队列会收到该work，它表示要处理service的引用计数
 		BINDER_WORK_DEAD_BINDER, // node死亡时向client发送此类型work进行通知，最后这三个都是发往client的
 		BINDER_WORK_DEAD_BINDER_AND_CLEAR, //client注销死亡通知时，发现还有死亡通知等待处理，此时发送此类型work
 		BINDER_WORK_CLEAR_DEATH_NOTIFICATION, // clinet注销死亡通知时，没有待处理的死亡通知，可以正常注销
@@ -258,8 +258,11 @@ struct binder_node {
 	// service对象(如BnCameraService)的内存地址
 	void __user *cookie;
 	unsigned has_strong_ref:1;
+	// 驱动发送消息给service增加强引用，但是service还没有返回Acquire_done消息，
+	// 这段时间pending_strong_ref == 1
 	unsigned pending_strong_ref:1;
 	unsigned has_weak_ref:1;
+	// 类似于pending_strong_ref
 	unsigned pending_weak_ref:1;
 	unsigned has_async_transaction:1;
 	unsigned accept_fds:1;
@@ -1970,7 +1973,9 @@ int binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 		case BC_ACQUIRE:
 		case BC_RELEASE:
 		case BC_DECREFS: {
-			uint32_t target;
+			// 这是从client传递进来的命令，要求修改binder_ref对象的引用
+			// 首先获取到binder_ref对象，然后分情况处理各个命令
+			uint32_t target; // 即handle/desc
 			struct binder_ref *ref;
 			const char *debug_string;
 
@@ -2020,7 +2025,9 @@ int binder_thread_write(struct binder_proc *proc, struct binder_thread *thread,
 		}
 		case BC_INCREFS_DONE:
 		case BC_ACQUIRE_DONE: {
-			void __user *node_ptr;
+			// 这是service端修改BBinder引用计数完成之后，
+			// 告知驱动时发送的消息
+			void __user *node_ptr; // weak ref of BBinder
 			void *cookie;
 			struct binder_node *node;
 
